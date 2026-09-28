@@ -10,6 +10,11 @@ SCHEME="WeChatCloneProfile"
 BUILD_DIR="$ROOT/.build"
 WORK_DIR="$ROOT/.work"
 OUTPUT_DIR="$ROOT/Output"
+STATE_DIR="$ROOT/.state"
+PROFILE_EXPIRY_FILE="$STATE_DIR/profile_expiration_epoch"
+PROFILE_EXPIRY_ISO_FILE="$STATE_DIR/profile_expiration_iso"
+LAST_DEVICE_FILE="$STATE_DIR/last_device_id"
+AUTO_REFRESH_DEVICE_FILE="$STATE_DIR/autorefresh_device_id"
 
 die() {
   echo
@@ -399,6 +404,14 @@ list_physical_iphones() {
 }
 
 pick_device() {
+  if [ -n "${WECHAT2_DEVICE_ID:-}" ]; then
+    DEVICE_LINE="$(list_physical_iphones | grep -F "(${WECHAT2_DEVICE_ID})" | head -1 || true)"
+    [ -n "$DEVICE_LINE" ] || die "Configured iPhone ${WECHAT2_DEVICE_ID} is not currently online/visible to Xcode tools."
+    DEVICE_ID="$WECHAT2_DEVICE_ID"
+    ok "Using configured device: $DEVICE_LINE"
+    return 0
+  fi
+
   DEVICE_TMP="$WORK_DIR/devices.txt"
   mkdir -p "$WORK_DIR"
   list_physical_iphones > "$DEVICE_TMP"
@@ -443,6 +456,10 @@ ensure_xcode_destination_ready() {
     return 0
   fi
 
+  if [ "${WECHAT2_NONINTERACTIVE:-0}" = "1" ]; then
+    die "iPhone $DEVICE_ID is visible to xctrace but is not currently a usable Xcode destination. The scheduled job will retry later."
+  fi
+
   echo
   warn "The iPhone is visible to xctrace, but Xcode does not yet list it as a usable iOS destination."
   echo
@@ -481,6 +498,10 @@ prepare_team_interactively_if_needed() {
   if discover_team_id; then
     write_team_into_project "$DISCOVERED_TEAM"
     return 0
+  fi
+
+  if [ "${WECHAT2_NONINTERACTIVE:-0}" = "1" ]; then
+    die "No Apple Development Team is available for unattended refresh. Open Xcode and complete the one-time signing setup."
   fi
 
   echo
@@ -642,4 +663,84 @@ verify_signed_app() {
   local app="$1"
   codesign --verify --deep --strict --verbose=2 "$app"
   ok "Code signature verification passed."
+}
+
+
+ensure_state_dir() {
+  mkdir -p "$STATE_DIR"
+}
+
+save_last_device_id() {
+  local device_id="$1"
+  ensure_state_dir
+  printf '%s\n' "$device_id" > "$LAST_DEVICE_FILE"
+}
+
+read_last_device_id() {
+  [ -f "$LAST_DEVICE_FILE" ] || return 1
+  head -1 "$LAST_DEVICE_FILE"
+}
+
+save_autorefresh_device_id() {
+  local device_id="$1"
+  ensure_state_dir
+  printf '%s\n' "$device_id" > "$AUTO_REFRESH_DEVICE_FILE"
+}
+
+read_autorefresh_device_id() {
+  [ -f "$AUTO_REFRESH_DEVICE_FILE" ] || return 1
+  head -1 "$AUTO_REFRESH_DEVICE_FILE"
+}
+
+record_profile_expiration_state() {
+  local profile_plist="$1"
+  [ -f "$profile_plist" ] || return 1
+  ensure_state_dir
+
+  python3 - "$profile_plist" "$PROFILE_EXPIRY_FILE" "$PROFILE_EXPIRY_ISO_FILE" <<'PY'
+import plistlib
+import sys
+from datetime import timezone
+
+profile_path, epoch_path, iso_path = sys.argv[1:4]
+with open(profile_path, "rb") as f:
+    data = plistlib.load(f)
+
+dt = data.get("ExpirationDate")
+if dt is None:
+    raise SystemExit("Provisioning profile has no ExpirationDate")
+if dt.tzinfo is None:
+    dt = dt.replace(tzinfo=timezone.utc)
+
+epoch = int(dt.timestamp())
+with open(epoch_path, "w") as f:
+    f.write(str(epoch) + "\n")
+with open(iso_path, "w") as f:
+    f.write(dt.astimezone(timezone.utc).isoformat() + "\n")
+PY
+
+  ok "Recorded provisioning expiration: $(profile_expiration_human 2>/dev/null || cat "$PROFILE_EXPIRY_ISO_FILE")"
+}
+
+read_profile_expiration_epoch() {
+  [ -f "$PROFILE_EXPIRY_FILE" ] || return 1
+  local value
+  value="$(head -1 "$PROFILE_EXPIRY_FILE" 2>/dev/null || true)"
+  case "$value" in
+    ''|*[!0-9]*) return 1 ;;
+    *) printf '%s\n' "$value" ;;
+  esac
+}
+
+profile_expiration_human() {
+  local epoch
+  epoch="$(read_profile_expiration_epoch)" || return 1
+  date -r "$epoch" '+%Y-%m-%d %H:%M:%S %Z'
+}
+
+profile_seconds_remaining() {
+  local epoch now
+  epoch="$(read_profile_expiration_epoch)" || return 1
+  now="$(date +%s)"
+  echo $((epoch - now))
 }
