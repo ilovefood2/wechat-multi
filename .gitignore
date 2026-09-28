@@ -1,0 +1,6 @@
+.generated/
+.build/
+.work/
+Output/
+IPA/WeChat.ipa
+.DS_Store
