@@ -963,6 +963,12 @@ recover_profile_expiration_state() {
   return 1
 }
 
+device_transport_type() {
+  local device_id="$1"
+  xcrun devicectl device info details --device "$device_id" 2>/dev/null \
+    | sed -nE 's/.*transportType:[[:space:]]*([^,[:space:]}]+).*/\1/p' \
+    | head -1 || true
+}
 install_app_with_retry() {
   local device_id="$1"
   local app_path="$2"
@@ -974,6 +980,17 @@ install_app_with_retry() {
 
   ensure_state_dir
 
+  TRANSPORT="$(device_transport_type "$device_id")"
+  if [ -n "$TRANSPORT" ]; then
+    note "CoreDevice transport: $TRANSPORT"
+  fi
+
+  if [ "$TRANSPORT" = "localNetwork" ] && [ "${WECHAT2_NONINTERACTIVE:-0}" != "1" ]; then
+    warn "The iPhone is currently connected through Xcode's local-network transport."
+    echo "This transport can produce RSD 0xE8000003 during development-app installation."
+    echo "For this install, connect the iPhone to the Mac with USB and keep it unlocked."
+  fi
+
   while [ "$attempt" -le "$max_attempts" ]; do
     if [ "$attempt" -gt 1 ]; then
       case "$attempt" in
@@ -984,6 +1001,8 @@ install_app_with_retry() {
       esac
       note "Retrying iPhone install in ${delay}s (attempt $attempt/$max_attempts)..."
       sleep "$delay"
+      TRANSPORT="$(device_transport_type "$device_id")"
+      [ -n "$TRANSPORT" ] && note "CoreDevice transport: $TRANSPORT"
     fi
 
     : > "$install_log"
