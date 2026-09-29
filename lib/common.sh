@@ -963,12 +963,24 @@ recover_profile_expiration_state() {
   return 1
 }
 
-device_transport_type() {
-  local device_id="$1"
-  xcrun devicectl device info details --device "$device_id" 2>/dev/null \
-    | sed -nE 's/.*transportType:[[:space:]]*([^,[:space:]}]+).*/\1/p' \
-    | head -1 || true
+classify_devicectl_install_error() {
+  local log_file="$1"
+
+  if grep -Eq 'Failed to allocate RSD device|0xE8000003|-402653181' "$log_file"; then
+    echo "rsd_transient"
+  elif grep -Eqi 'kAMDPasswordProtectedError|password protected|device[^[:alnum:]]+locked|unlock the device|device is locked' "$log_file"; then
+    echo "device_locked"
+  elif grep -Eqi 'device[^[:alnum:]]+(not found|not connected|offline|unavailable)|no device|failed to find device|connection.*lost' "$log_file"; then
+    echo "device_unavailable"
+  elif grep -Eqi 'ApplicationVerificationFailed|Failed to verify code signature|code signature|provisioning profile|embedded.mobileprovision|0xE8008001|0xE8008015|integrity could not be verified' "$log_file"; then
+    echo "signing_validation"
+  elif grep -Eqi 'timed out|timeout|temporarily unavailable|connection reset|CoreDeviceError|mobiledevice error' "$log_file"; then
+    echo "transport_transient"
+  else
+    echo "unknown"
+  fi
 }
+
 install_app_with_retry() {
   local device_id="$1"
   local app_path="$2"
@@ -976,20 +988,10 @@ install_app_with_retry() {
   local attempt=1
   local max_attempts=5
   local delay=0
-  local rc
+  local rc=1
+  local error_class="unknown"
 
   ensure_state_dir
-
-  TRANSPORT="$(device_transport_type "$device_id")"
-  if [ -n "$TRANSPORT" ]; then
-    note "CoreDevice transport: $TRANSPORT"
-  fi
-
-  if [ "$TRANSPORT" = "localNetwork" ] && [ "${WECHAT2_NONINTERACTIVE:-0}" != "1" ]; then
-    warn "The iPhone is currently connected through Xcode's local-network transport."
-    echo "This transport can produce RSD 0xE8000003 during development-app installation."
-    echo "For this install, connect the iPhone to the Mac with USB and keep it unlocked."
-  fi
 
   while [ "$attempt" -le "$max_attempts" ]; do
     if [ "$attempt" -gt 1 ]; then
@@ -1001,46 +1003,84 @@ install_app_with_retry() {
       esac
       note "Retrying iPhone install in ${delay}s (attempt $attempt/$max_attempts)..."
       sleep "$delay"
-      TRANSPORT="$(device_transport_type "$device_id")"
-      [ -n "$TRANSPORT" ] && note "CoreDevice transport: $TRANSPORT"
     fi
 
     : > "$install_log"
+
     set +e
     xcrun devicectl device install app --device "$device_id" "$app_path" 2>&1 | tee "$install_log"
     rc=${PIPESTATUS[0]}
     set -e
 
-    if [ "$rc" -eq 0 ] && ! grep -Eq 'ERROR:|Failed to allocate RSD device|0xE8000003' "$install_log"; then
+    # Some devicectl/CoreDevice failures have historically produced confusing
+    # status codes, so require both a successful exit code and no ERROR line.
+    if [ "$rc" -eq 0 ] && ! grep -Eq '(^|[[:space:]])ERROR:|Failed to allocate RSD device|0xE8000003' "$install_log"; then
       ok "App install completed."
       return 0
     fi
 
-    if grep -Eq 'Failed to allocate RSD device|0xE8000003|-402653181|CoreDeviceError error -1' "$install_log"; then
-      warn "CoreDevice/RSD transport is temporarily unavailable (0xE8000003)."
+    error_class="$(classify_devicectl_install_error "$install_log")"
 
-      if [ "${WECHAT2_NONINTERACTIVE:-0}" != "1" ] && [ "$attempt" -eq 1 ]; then
-        echo "Keep the iPhone unlocked and connected. If USB is available, unplug/replug"
-        echo "the cable once before the next retry. No re-signing is needed."
-      fi
+    case "$error_class" in
+      rsd_transient)
+        warn "Transient CoreDevice/RSD failure detected (0xE8000003)."
+        if [ "${WECHAT2_NONINTERACTIVE:-0}" != "1" ] && [ "$attempt" -eq 1 ]; then
+          echo "The app is already signed correctly; this failure happened only during device installation."
+          echo "Keep the iPhone unlocked and connected. Reconnecting the cable can clear a stuck RSD session."
+        fi
+        attempt=$((attempt + 1))
+        continue
+        ;;
 
-      attempt=$((attempt + 1))
-      continue
-    fi
+      transport_transient)
+        warn "Transient CoreDevice/mobiledevice communication failure detected."
+        attempt=$((attempt + 1))
+        continue
+        ;;
 
-    echo
-    echo "devicectl install failed with a non-retryable error."
-    echo "Full install log:"
-    echo "  $install_log"
-    return "${rc:-1}"
+      device_locked)
+        echo
+        warn "The iPhone appears to be locked or unavailable for developer services."
+        echo "Unlock the iPhone and leave it on the Home Screen, then retry."
+        echo "Signed app remains available at: $app_path"
+        echo "Install log: $install_log"
+        return 75
+        ;;
+
+      device_unavailable)
+        echo
+        warn "The target iPhone is no longer available to CoreDevice."
+        echo "Reconnect the iPhone / restore the development connection, then retry."
+        echo "Signed app remains available at: $app_path"
+        echo "Install log: $install_log"
+        return 75
+        ;;
+
+      signing_validation)
+        echo
+        echo "❌ iOS rejected the application during installation/signature validation."
+        echo "This is not a transient device-transport error, so it will not be retried automatically."
+        echo "Install log: $install_log"
+        return 65
+        ;;
+
+      *)
+        echo
+        echo "❌ devicectl install failed with an unclassified error (exit $rc)."
+        echo "Last log lines:"
+        tail -n 25 "$install_log" 2>/dev/null || true
+        echo
+        echo "Full install log: $install_log"
+        return "$rc"
+        ;;
+    esac
   done
 
   echo
-  echo "iPhone install still failed after $max_attempts attempts because CoreDevice/RSD"
-  echo "could not allocate a device session (0xE8000003)."
-  echo "The signed app is still valid and does not need to be re-signed."
-  echo "Try keeping the iPhone unlocked and reconnecting USB, then rerun the install."
-  echo "Full install log:"
-  echo "  $install_log"
+  echo "❌ iPhone install did not recover after $max_attempts attempts."
+  echo "Last error class: $error_class"
+  echo "The app was already signed successfully, so re-signing is not required."
+  echo "Signed app remains available at: $app_path"
+  echo "Full install log: $install_log"
   return 75
 }
