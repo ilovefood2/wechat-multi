@@ -14,6 +14,7 @@ echo
 
 require_xcode
 ensure_bootstrap_project
+recover_pending_profile_cache_transactions >/dev/null 2>&1 || true
 pick_device
 prepare_team_interactively_if_needed
 check_ipa_cryptid
@@ -77,6 +78,7 @@ codesign \
   "$APP"
 
 verify_signed_app "$APP"
+prepare_install_profile_manifest "$APP" "$DEVICE_ID" "$DISCOVERED_TEAM"
 
 if [ "$EXPORT_SIGNED_IPA" = "1" ]; then
   SIGNED_IPA="$OUTPUT_DIR/WeChat2-signed.ipa"
@@ -92,8 +94,11 @@ echo
 note "Installing on iPhone..."
 install_app_with_retry "$DEVICE_ID" "$APP"
 
-record_profile_expiration_state "$PROFILE_PLIST"
+# Only after devicectl reports a successful installation do we commit the
+# all-bundle provisioning receipt used by smart auto-refresh.
+commit_successful_install_receipt "$APP" "$DEVICE_ID" "$DISCOVERED_TEAM"
 save_last_device_id "$DEVICE_ID"
+reconcile_smart_autorefresh_if_installed
 
 echo
 echo "===================================================="
