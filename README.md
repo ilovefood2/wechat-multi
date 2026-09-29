@@ -139,3 +139,20 @@ Log:
 ```
 
 The LaunchAgent stores the absolute path to this checkout. Do not move or delete the repository folder while the schedule is installed; uninstall/reinstall the schedule after moving it.
+
+
+## Refreshing from a different Mac
+
+The Apple development signing setup is **per Mac**.
+
+If you clone/copy this repository to another Mac and choose option 3 immediately, that Mac may have unrelated or migrated Apple Development certificates in Keychain. The scripts deliberately do **not** trust those certificates as proof of an authenticated Xcode Team.
+
+On each new Mac, do the one-time setup first:
+
+```text
+1) New Mac / new iPhone setup
+```
+
+Select the Personal Team in Xcode and run the small bootstrap test app once on that Mac. Xcode will create a live provisioning profile for this Bundle ID. After that, options 2/3 and smart auto-refresh can safely discover and reuse the verified Team on that Mac.
+
+A certificate-only Team ID is treated as a hint and will not be selected automatically.
