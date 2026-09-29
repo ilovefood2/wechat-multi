@@ -962,3 +962,66 @@ recover_profile_expiration_state() {
 
   return 1
 }
+
+install_app_with_retry() {
+  local device_id="$1"
+  local app_path="$2"
+  local install_log="$STATE_DIR/last_devicectl_install.log"
+  local attempt=1
+  local max_attempts=5
+  local delay=0
+  local rc
+
+  ensure_state_dir
+
+  while [ "$attempt" -le "$max_attempts" ]; do
+    if [ "$attempt" -gt 1 ]; then
+      case "$attempt" in
+        2) delay=5 ;;
+        3) delay=10 ;;
+        4) delay=20 ;;
+        *) delay=30 ;;
+      esac
+      note "Retrying iPhone install in ${delay}s (attempt $attempt/$max_attempts)..."
+      sleep "$delay"
+    fi
+
+    : > "$install_log"
+    set +e
+    xcrun devicectl device install app --device "$device_id" "$app_path" 2>&1 | tee "$install_log"
+    rc=${PIPESTATUS[0]}
+    set -e
+
+    if [ "$rc" -eq 0 ] && ! grep -Eq 'ERROR:|Failed to allocate RSD device|0xE8000003' "$install_log"; then
+      ok "App install completed."
+      return 0
+    fi
+
+    if grep -Eq 'Failed to allocate RSD device|0xE8000003|-402653181|CoreDeviceError error -1' "$install_log"; then
+      warn "CoreDevice/RSD transport is temporarily unavailable (0xE8000003)."
+
+      if [ "${WECHAT2_NONINTERACTIVE:-0}" != "1" ] && [ "$attempt" -eq 1 ]; then
+        echo "Keep the iPhone unlocked and connected. If USB is available, unplug/replug"
+        echo "the cable once before the next retry. No re-signing is needed."
+      fi
+
+      attempt=$((attempt + 1))
+      continue
+    fi
+
+    echo
+    echo "devicectl install failed with a non-retryable error."
+    echo "Full install log:"
+    echo "  $install_log"
+    return "${rc:-1}"
+  done
+
+  echo
+  echo "iPhone install still failed after $max_attempts attempts because CoreDevice/RSD"
+  echo "could not allocate a device session (0xE8000003)."
+  echo "The signed app is still valid and does not need to be re-signed."
+  echo "Try keeping the iPhone unlocked and reconnecting USB, then rerun the install."
+  echo "Full install log:"
+  echo "  $install_log"
+  return 75
+}
