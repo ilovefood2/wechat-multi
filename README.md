@@ -191,53 +191,6 @@ the repository folder while the schedule is installed; uninstall/reinstall the
 schedule after moving it.
 
 
-## Recovering the older `com.kj.wechat2` clone without deleting its data
-
-If an older separately signed clone still exists on the iPhone and its chat data
-must be preserved, do **not** uninstall it.
-
-This repository includes a dedicated recovery workflow for the older clone:
-
-```text
-Bundle ID: com.kj.wechat2
-Default Team: 468U2JDYD3
-```
-
-Before using it, first copy the old app's `Documents` and `Library` folders
-from the iPhone data container to the Mac. The recovery script refuses to
-continue unless the backup folders exist and are non-trivially sized.
-
-Run Manager option:
-
-```text
-9) Recover old com.kj.wechat2 clone (preserve data)
-```
-
-or:
-
-```bash
-bash recover_old_wechat.command
-```
-
-The recovery workflow:
-
-- keeps the normal `com.kelvin.wechat2.kj7f93c2a8` clone and its scheduler state separate;
-- verifies `com.kj.wechat2` is still installed on the selected iPhone;
-- uses the current `IPA/WeChat.ipa` as the source;
-- keeps the old Bundle ID exactly `com.kj.wechat2`;
-- keeps the recovery Team at `468U2JDYD3` unless explicitly overridden;
-- signs the newer IPA with a provisioning profile valid for that old Bundle ID/device;
-- installs it **in place** over the old clone and never runs uninstall first;
-- stores all recovery build/state artifacts under `.recovery-old/`, so the normal
-  clone's `.state/install_receipt.json` is not overwritten.
-
-The expected result is an app update for the old Bundle ID, allowing iOS to keep
-that app's existing data container. Because application data can also depend on
-Keychain/access groups, using the same Team and Bundle ID is intentional.
-
-Do not delete the old app until the recovered version has opened successfully and
-the required chat history has been verified.
-
 ## Refreshing from a different Mac
 
 The Apple development signing setup is **per Mac**.
