@@ -92,6 +92,9 @@ echo
 note "Installing on iPhone..."
 xcrun devicectl device install app --device "$DEVICE_ID" "$APP"
 
+record_profile_expiration_state "$PROFILE_PLIST"
+save_last_device_id "$DEVICE_ID"
+
 echo
 echo "===================================================="
 echo "✅ WeChat 2 installed"

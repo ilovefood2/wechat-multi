@@ -91,3 +91,51 @@ not behave like the App Store installation.
 
 The installer now verifies the selected iPhone appears in `xcodebuild -showdestinations`, not just `xctrace list devices`.
 If the phone is visible to macOS but not yet usable by Xcode, the script opens the generated project and waits for you to finish Trust / Developer Mode / Device Hub pairing before retrying.
+
+
+## Smart auto-refresh schedule
+
+Manager options:
+
+```text
+5) Install smart auto-refresh schedule
+6) Uninstall smart auto-refresh schedule
+7) Smart auto-refresh status
+```
+
+You can also run:
+
+```bash
+bash setup_wechat2_smart_autorefresh.sh install
+bash setup_wechat2_smart_autorefresh.sh uninstall
+bash setup_wechat2_smart_autorefresh.sh status
+```
+
+The schedule uses a per-user LaunchAgent:
+
+```text
+com.ilovefood2.wechat2.smart-autorefresh
+```
+
+Behavior:
+
+- The actual provisioning expiration time is recorded after every successful install/refresh.
+- The LaunchAgent wakes once per hour, but before the final 24 hours it only reads the local expiry timestamp and exits immediately.
+- During roughly the first six days of a seven-day Personal Team signature, it does **not** start Xcode, check the iPhone, re-sign, or reinstall.
+- Once the signature enters its final 24 hours, it attempts a refresh once per hour.
+- If the target iPhone is offline/not visible, the attempt is skipped and the next hourly run retries.
+- If the Mac is asleep/offline, launchd resumes the schedule when the Mac is running again; `RunAtLoad` also performs a check when the agent is loaded after login.
+- If Apple/Xcode/network provisioning fails, the schedule remains installed and retries the next hour.
+- After a successful refresh, the new expiry is recorded. Subsequent hourly launches go back to the lightweight idle check until the next final-24-hour window.
+
+The scheduled refresh is intentionally non-interactive. If Xcode pairing, Developer Mode, the Apple Account, or the Development Team requires user attention, the background attempt fails safely and retries later rather than opening prompts.
+
+The target iPhone is saved when you install the schedule. Re-run **Install smart auto-refresh schedule** if you want to change the target phone.
+
+Log:
+
+```text
+~/Library/Logs/WeChat2SmartAutoRefresh.log
+```
+
+The LaunchAgent stores the absolute path to this checkout. Do not move or delete the repository folder while the schedule is installed; uninstall/reinstall the schedule after moving it.
