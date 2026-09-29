@@ -699,63 +699,119 @@ build_bootstrap_profile() {
   ok "Provisioning profile created by Xcode."
 }
 
+profile_certificate_hashes() {
+  local profile_plist="$1"
+  [ -f "$profile_plist" ] || return 1
+
+  python3 - "$profile_plist" <<'PY'
+import hashlib
+import plistlib
+import sys
+
+with open(sys.argv[1], "rb") as f:
+    p = plistlib.load(f)
+
+for cert in p.get("DeveloperCertificates", []):
+    print(hashlib.sha1(cert).hexdigest().upper())
+PY
+}
+
+validate_bootstrap_profile() {
+  local profile_plist="$1"
+  local expected_bundle="$2"
+  local expected_device="$3"
+
+  python3 - "$profile_plist" "$expected_bundle" "$expected_device" <<'PY'
+import plistlib
+import sys
+from datetime import datetime, timezone
+
+path, bundle_id, device_id = sys.argv[1:4]
+with open(path, "rb") as f:
+    p = plistlib.load(f)
+
+errors = []
+ents = p.get("Entitlements", {})
+app_id = ents.get("application-identifier", "")
+if not (app_id == bundle_id or app_id.endswith("." + bundle_id)):
+    errors.append(f"application-identifier mismatch: {app_id!r}")
+
+devices = p.get("ProvisionedDevices", [])
+if device_id not in devices:
+    errors.append(f"target device {device_id} is not listed in ProvisionedDevices")
+
+expiry = p.get("ExpirationDate")
+if expiry is None:
+    errors.append("profile has no ExpirationDate")
+else:
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+    if expiry <= datetime.now(timezone.utc):
+        errors.append(f"profile is expired: {expiry.isoformat()}")
+
+certs = p.get("DeveloperCertificates", [])
+if not certs:
+    errors.append("profile contains no DeveloperCertificates")
+
+if errors:
+    for e in errors:
+        print(e, file=sys.stderr)
+    raise SystemExit(1)
+
+print(app_id)
+PY
+}
+
 find_signing_identity() {
   IDENTITY_HASH=""
   IDENTITY_DESC=""
 
-  # Xcode has just successfully built and signed BOOTSTRAP_APP. Use the exact
-  # signing authority from that app instead of assuming the certificate CN's
-  # parenthesized identifier is the Team ID. On Personal Teams those values can
-  # differ even though TeamIdentifier/application-identifier are correct.
-  if [ -n "${BOOTSTRAP_APP:-}" ] && [ -d "$BOOTSTRAP_APP" ]; then
-    BOOTSTRAP_TEAM="$(
-      /usr/bin/codesign -dv --verbose=4 "$BOOTSTRAP_APP" 2>&1 \
-        | sed -n 's/^TeamIdentifier=//p' \
-        | head -1
-    )"
-    BOOTSTRAP_AUTHORITY="$(
-      /usr/bin/codesign -dv --verbose=4 "$BOOTSTRAP_APP" 2>&1 \
-        | sed -n 's/^Authority=//p' \
-        | head -1
-    )"
+  [ -f "${PROFILE_PLIST:-}" ] || die "Decoded provisioning profile is unavailable; cannot choose a matching signing identity."
 
-    if [ -n "${DISCOVERED_TEAM:-}" ] && [ -n "$BOOTSTRAP_TEAM" ] && [ "$BOOTSTRAP_TEAM" != "$DISCOVERED_TEAM" ]; then
-      die "Xcode signed the bootstrap app with Team $BOOTSTRAP_TEAM, but the selected provisioning profile reports Team $DISCOVERED_TEAM. Re-run setup and use one consistent Personal Team."
-    fi
-
-    if [ -n "$BOOTSTRAP_AUTHORITY" ]; then
-      IDENTITY_HASH="$(
-        security find-identity -v -p codesigning 2>/dev/null \
-          | awk -v auth="$BOOTSTRAP_AUTHORITY" 'index($0, "\"" auth "\"") {print $2; exit}'
-      )"
-      if [ -n "$IDENTITY_HASH" ]; then
-        IDENTITY_DESC="$BOOTSTRAP_AUTHORITY"
-      fi
-    fi
+  note "Validating Xcode provisioning profile against Bundle ID and target iPhone..."
+  if ! validate_bootstrap_profile "$PROFILE_PLIST" "$BUNDLE_ID" "$DEVICE_ID" >/dev/null; then
+    die "Xcode's provisioning profile does not match the target Bundle ID/device."
   fi
+  ok "Provisioning profile matches Bundle ID and target iPhone."
 
-  # Fallback: if the exact Xcode authority could not be mapped, choose an Apple
-  # Development identity and later rely on the embedded profile/codesign checks.
-  # Do not match the certificate CN's parenthesized value to TeamIdentifier.
+  PROFILE_CERT_HASHES="$(profile_certificate_hashes "$PROFILE_PLIST" 2>/dev/null || true)"
+  [ -n "$PROFILE_CERT_HASHES" ] || die "Provisioning profile contains no usable DeveloperCertificates."
+
+  # The provisioning profile explicitly lists the certificates allowed to sign
+  # this executable. Match Keychain identities by SHA-1 fingerprint instead of
+  # by display name/Team text. This is critical on Macs with multiple or migrated
+  # Apple Development certificates.
+  while IFS= read -r line; do
+    HASH="$(printf '%s\n' "$line" | awk '{print $2}')"
+    DESC="$(printf '%s\n' "$line" | sed -E 's/^[[:space:]]*[0-9]+\)[[:space:]]+[A-Fa-f0-9]+[[:space:]]+"(.*)"$/\1/')"
+
+    case "$HASH" in
+      ''|*[!A-Fa-f0-9]*) continue ;;
+    esac
+
+    if printf '%s\n' "$PROFILE_CERT_HASHES" | grep -Fqx "$(printf '%s' "$HASH" | tr '[:lower:]' '[:upper:]')"; then
+      case "$DESC" in
+        Apple\ Development:*)
+          IDENTITY_HASH="$HASH"
+          IDENTITY_DESC="$DESC"
+          break
+          ;;
+      esac
+    fi
+  done < <(security find-identity -v -p codesigning 2>/dev/null)
+
   if [ -z "$IDENTITY_HASH" ]; then
-    IDENTITY_HASH="$(
-      security find-identity -v -p codesigning 2>/dev/null \
-        | awk '/"Apple Development:/{print $2; exit}'
-    )"
-    if [ -n "$IDENTITY_HASH" ]; then
-      IDENTITY_DESC="$(
-        security find-identity -v -p codesigning 2>/dev/null \
-          | awk -v h="$IDENTITY_HASH" '$2==h {$1="";$2=""; sub(/^ +/,""); print; exit}'
-      )"
-    fi
+    echo
+    echo "Provisioning profile allows these certificate SHA-1 fingerprints:"
+    printf '  %s\n' $PROFILE_CERT_HASHES
+    echo
+    echo "But none of those Apple Development identities are available with a private key in this Mac's Keychain."
+    echo "Open Xcode > Settings > Accounts, select the account/Personal Team, and let Xcode create/download a Development certificate."
+    die "No Keychain signing identity matches the provisioning profile."
   fi
 
-  [ -n "$IDENTITY_HASH" ] || die "No usable Apple Development signing identity was found after Xcode successfully provisioned the bootstrap app."
-
-  ok "Signing identity: ${IDENTITY_DESC:-$IDENTITY_HASH}"
-  if [ -n "${BOOTSTRAP_TEAM:-}" ]; then
-    ok "Signing TeamIdentifier: $BOOTSTRAP_TEAM"
-  fi
+  ok "Signing identity matches provisioning profile: $IDENTITY_DESC"
+  ok "Signing certificate SHA-1: $IDENTITY_HASH"
 }
 
 check_ipa_cryptid() {
