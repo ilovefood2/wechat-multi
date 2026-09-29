@@ -15,6 +15,9 @@ PROFILE_EXPIRY_FILE="$STATE_DIR/profile_expiration_epoch"
 PROFILE_EXPIRY_ISO_FILE="$STATE_DIR/profile_expiration_iso"
 LAST_DEVICE_FILE="$STATE_DIR/last_device_id"
 AUTO_REFRESH_DEVICE_FILE="$STATE_DIR/autorefresh_device_id"
+INSTALL_RECEIPT_FILE="$STATE_DIR/install_receipt.json"
+AUTOREFRESH_HELPER="$ROOT/lib/autorefresh_helper.py"
+AUTOREFRESH_MANIFEST_FILE="$WORK_DIR/install-profile-manifest.json"
 
 die() {
   echo
@@ -37,6 +40,7 @@ load_config() {
   : "${IPA_RELATIVE_PATH:?IPA_RELATIVE_PATH missing}"
   : "${REMOVE_EXTENSIONS:=1}"
   : "${EXPORT_SIGNED_IPA:=1}"
+  : "${AUTO_REFRESH_WINDOW_SECONDS:=86400}"
 
   IPA="$ROOT/$IPA_RELATIVE_PATH"
 }
@@ -632,6 +636,19 @@ build_bootstrap_profile() {
 
   mkdir -p "$STATE_DIR"
   XCODE_LOG="$STATE_DIR/last_xcodebuild.log"
+  PROFILE_CACHE_TX=""
+
+  if [ "${WECHAT2_REQUIRE_EXPIRY_ADVANCE:-0}" = "1" ]; then
+    PREVIOUS_EXPIRY="${WECHAT2_PREVIOUS_EXPIRY:-0}"
+    case "$PREVIOUS_EXPIRY" in
+      ''|*[!0-9]*) die "Automatic refresh is missing a valid previous expiry timestamp." ;;
+    esac
+
+    recover_pending_profile_cache_transactions >/dev/null 2>&1 || true
+    note "Backing up matching cached provisioning profiles before forced renewal..."
+    PROFILE_CACHE_TX="$(begin_profile_cache_transaction "$BUNDLE_ID" "$DEVICE_ID" "$DISCOVERED_TEAM")"
+    note "Profile-cache backup: $PROFILE_CACHE_TX"
+  fi
 
   set +e
   xcodebuild \
@@ -648,13 +665,14 @@ build_bootstrap_profile() {
   set -e
 
   if [ "$rc" -ne 0 ]; then
+    if [ -n "$PROFILE_CACHE_TX" ]; then
+      restore_profile_cache_transaction "$PROFILE_CACHE_TX" >/dev/null 2>&1 || true
+      warn "Renewal failed; missing old provisioning-cache entries were restored."
+    fi
+
     if grep -q 'No Account for Team' "$XCODE_LOG"; then
       echo
       warn "Xcode does not have an authenticated account for Team $DISCOVERED_TEAM."
-      if [ "${TEAM_SOURCE:-}" = "certificate" ]; then
-        echo "That Team ID was inferred only from an Apple Development certificate in Keychain."
-        echo "A migrated/stale certificate does not prove the matching Apple Account is signed into Xcode."
-      fi
       echo
       echo "One-time fix:"
       echo "  1) Open Xcode > Settings > Accounts and sign into the Apple Account you want to use."
@@ -695,6 +713,23 @@ build_bootstrap_profile() {
 
   security cms -D -i "$PROFILE" > "$PROFILE_PLIST"
   plutil -extract Entitlements xml1 -o "$ENTITLEMENTS" "$PROFILE_PLIST"
+
+  if [ "${WECHAT2_REQUIRE_EXPIRY_ADVANCE:-0}" = "1" ]; then
+    NEW_EXPIRY="$(profile_expiration_epoch_from_plist "$PROFILE_PLIST")"
+    NOW_EPOCH="$(date +%s)"
+    MIN_FRESH_EXPIRY=$((NOW_EPOCH + AUTO_REFRESH_WINDOW_SECONDS + 300))
+    if [ "$PREVIOUS_EXPIRY" -gt "$MIN_FRESH_EXPIRY" ]; then
+      MIN_FRESH_EXPIRY="$PREVIOUS_EXPIRY"
+    fi
+
+    if [ "$NEW_EXPIRY" -le "$MIN_FRESH_EXPIRY" ]; then
+      [ -n "$PROFILE_CACHE_TX" ] && restore_profile_cache_transaction "$PROFILE_CACHE_TX" >/dev/null 2>&1 || true
+      die "Xcode did not provide a genuinely renewed profile. New expiry must be later than both the previous installed expiry and the renewal window."
+    fi
+
+    [ -n "$PROFILE_CACHE_TX" ] && mark_profile_cache_transaction_success "$PROFILE_CACHE_TX"
+    ok "Provisioning expiration advanced: $(date -r "$PREVIOUS_EXPIRY" '+%Y-%m-%d %H:%M:%S %Z') -> $(date -r "$NEW_EXPIRY" '+%Y-%m-%d %H:%M:%S %Z')"
+  fi
 
   ok "Provisioning profile created by Xcode."
 }
@@ -1021,6 +1056,128 @@ recover_profile_expiration_state() {
   fi
 
   return 1
+}
+
+
+profile_expiration_epoch_from_plist() {
+  local plist="$1"
+  python3 "$AUTOREFRESH_HELPER" plist-expiry "$plist"
+}
+
+recover_pending_profile_cache_transactions() {
+  [ -f "$AUTOREFRESH_HELPER" ] || return 0
+  python3 "$AUTOREFRESH_HELPER" tx-recover "$STATE_DIR"
+}
+
+begin_profile_cache_transaction() {
+  local bundle="$1"
+  local device="$2"
+  local team="$3"
+  python3 "$AUTOREFRESH_HELPER" tx-begin "$STATE_DIR" "$bundle" "$device" "$team"
+}
+
+restore_profile_cache_transaction() {
+  local tx="$1"
+  python3 "$AUTOREFRESH_HELPER" tx-restore "$tx"
+}
+
+mark_profile_cache_transaction_success() {
+  local tx="$1"
+  python3 "$AUTOREFRESH_HELPER" tx-success "$tx"
+}
+
+prepare_install_profile_manifest() {
+  local app="$1"
+  local device="$2"
+  local team="$3"
+
+  [ -f "$AUTOREFRESH_HELPER" ] || die "Missing $AUTOREFRESH_HELPER"
+  mkdir -p "$WORK_DIR"
+
+  python3 "$AUTOREFRESH_HELPER" manifest "$app" "$device" "$BUNDLE_ID" "$team" > "$AUTOREFRESH_MANIFEST_FILE"
+
+  local count effective
+  count="$(python3 - "$AUTOREFRESH_MANIFEST_FILE" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f:
+    d=json.load(f)
+print(d["profile_count"])
+PY
+)"
+  effective="$(python3 - "$AUTOREFRESH_MANIFEST_FILE" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f:
+    d=json.load(f)
+print(d["effective_expiry"])
+PY
+)"
+
+  if [ "${WECHAT2_REQUIRE_EXPIRY_ADVANCE:-0}" = "1" ]; then
+    local previous now minimum
+    previous="${WECHAT2_PREVIOUS_EXPIRY:-0}"
+    now="$(date +%s)"
+    minimum=$((now + AUTO_REFRESH_WINDOW_SECONDS))
+    if [ "$previous" -gt "$minimum" ]; then
+      minimum="$previous"
+    fi
+    [ "$effective" -gt "$minimum" ] || die "Signed app still does not leave the renewal window; refusing install."
+  fi
+
+  ok "Validated provisioning for $count embedded app bundle(s)."
+  ok "Earliest embedded profile expiry: $(date -r "$effective" '+%Y-%m-%d %H:%M:%S %Z')"
+}
+
+commit_successful_install_receipt() {
+  local app="$1"
+  local device="$2"
+  local team="$3"
+  local after="$WORK_DIR/install-profile-manifest.after.json"
+
+  [ -f "$AUTOREFRESH_MANIFEST_FILE" ] || die "Missing pre-install profile manifest."
+
+  python3 "$AUTOREFRESH_HELPER" manifest "$app" "$device" "$BUNDLE_ID" "$team" > "$after"
+  if ! cmp -s "$AUTOREFRESH_MANIFEST_FILE" "$after"; then
+    die "Signed app/profile manifest changed between verification and installation; installed-expiry state was not updated."
+  fi
+
+  local effective
+  effective="$(python3 "$AUTOREFRESH_HELPER" receipt-write "$after" "$INSTALL_RECEIPT_FILE")"
+  printf '%s\n' "$effective" > "$PROFILE_EXPIRY_FILE"
+  date -r "$effective" -u '+%Y-%m-%dT%H:%M:%SZ' > "$PROFILE_EXPIRY_ISO_FILE"
+
+  ok "Successful-install receipt recorded."
+  ok "Recorded effective provisioning expiration: $(date -r "$effective" '+%Y-%m-%d %H:%M:%S %Z')"
+}
+
+read_install_receipt_expiration_epoch() {
+  local device
+  device="${1:-$(read_autorefresh_device_id 2>/dev/null || true)}"
+  [ -n "$device" ] || device="$(read_last_device_id 2>/dev/null || true)"
+  [ -n "$device" ] || return 1
+  [ -f "$INSTALL_RECEIPT_FILE" ] || return 1
+  python3 "$AUTOREFRESH_HELPER" receipt-expiry "$INSTALL_RECEIPT_FILE" "$device" "$BUNDLE_ID" 2>/dev/null
+}
+
+install_receipt_human() {
+  local device epoch
+  device="${1:-}"
+  epoch="$(read_install_receipt_expiration_epoch "$device")" || return 1
+  date -r "$epoch" '+%Y-%m-%d %H:%M:%S %Z'
+}
+
+smart_autorefresh_is_installed() {
+  [ -f "$HOME/Library/LaunchAgents/com.ilovefood2.wechat2.autorefresh.wakeup.plist" ] \
+    || [ -f "$HOME/Library/LaunchAgents/com.ilovefood2.wechat2.smart-autorefresh.plist" ]
+}
+
+reconcile_smart_autorefresh_if_installed() {
+  if [ "${WECHAT2_AUTOREFRESH_CONTEXT:-0}" = "1" ]; then
+    return 0
+  fi
+  if smart_autorefresh_is_installed; then
+    /bin/bash "$ROOT/setup_wechat2_smart_autorefresh.sh" reconcile >/dev/null 2>&1 \
+      || warn "WeChat 2 installed, but the smart auto-refresh wake schedule could not be reconciled."
+  fi
 }
 
 classify_devicectl_install_error() {
