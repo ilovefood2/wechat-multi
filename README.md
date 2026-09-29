@@ -111,34 +111,79 @@ bash setup_wechat2_smart_autorefresh.sh uninstall
 bash setup_wechat2_smart_autorefresh.sh status
 ```
 
-The schedule uses a per-user LaunchAgent:
+### Two-stage scheduling
+
+The current scheduler uses two per-user LaunchAgents:
 
 ```text
-com.ilovefood2.wechat2.smart-autorefresh
+com.ilovefood2.wechat2.autorefresh.wakeup
+com.ilovefood2.wechat2.autorefresh.retry
 ```
 
-Behavior:
+The wake agent is scheduled for the verified installed profile expiry minus the
+renewal window (24 hours by default). During the quiet phase, the hourly retry
+agent is **not loaded at all**. The wake agent may perform a lightweight
+catch-up check when it is loaded after login, but there is no hourly polling,
+Xcode build, iPhone check, signing, or reinstall during the quiet phase.
 
-- The actual provisioning expiration time is recorded after every successful install/refresh.
-- The LaunchAgent wakes once per hour, but before the final 24 hours it only reads the local expiry timestamp and exits immediately.
-- During roughly the first six days of a seven-day Personal Team signature, it does **not** start Xcode, check the iPhone, re-sign, or reinstall.
-- Once the signature enters its final 24 hours, it attempts a refresh once per hour.
-- If the target iPhone is offline/not visible, the attempt is skipped and the next hourly run retries.
-- If the Mac is asleep/offline, launchd resumes the schedule when the Mac is running again; `RunAtLoad` also performs a check when the agent is loaded after login.
-- If Apple/Xcode/network provisioning fails, the schedule remains installed and retries the next hour.
-- After a successful refresh, the new expiry is recorded. Subsequent hourly launches go back to the lightweight idle check until the next final-24-hour window.
+When the renewal window opens, the retry agent is loaded and runs once per
+hour until renewal succeeds. If the Mac/iPhone/network is unavailable, it keeps
+retrying. After success, the retry agent is unloaded and the next wake-up is
+programmed from the newly verified expiry.
 
-The scheduled refresh is intentionally non-interactive. If Xcode pairing, Developer Mode, the Apple Account, or the Development Team requires user attention, the background attempt fails safely and retries later rather than opening prompts.
+The renewal window is configurable in `config.env`:
 
-The target iPhone is saved when you install the schedule. Re-run **Install smart auto-refresh schedule** if you want to change the target phone.
+```bash
+AUTO_REFRESH_WINDOW_SECONDS="86400"
+```
 
-Log:
+### Renewal correctness checks
+
+Automatic renewal is deliberately stricter than a normal manual install:
+
+- The previous **successful-install receipt** is the source of truth for expiry.
+  A cached Xcode profile by itself is not treated as proof of what is installed.
+- When renewal is due, matching local provisioning-profile cache entries for the
+  exact Bundle ID / Team / iPhone are backed up transactionally before asking
+  Xcode for a replacement.
+- The replacement profile must have a genuinely later `ExpirationDate` than
+  the previously installed profile and must extend beyond the renewal window.
+  A different profile UUID alone is not accepted as renewal.
+- Interrupted/failed renewal can restore missing old cache entries from
+  `.state/profile-backups/`.
+- Before installation, the signed app validates the top-level app and every
+  embedded `.app` / `.appex` that remains: Bundle ID, Team, target-device
+  authorization, expiration, development entitlement, and an allowed
+  Apple Development certificate/private key.
+- With the default `REMOVE_EXTENSIONS="1"`, those embedded extensions are
+  removed, so the validated manifest normally contains only the main app.
+  If extensions are kept, each one must have its own valid development profile.
+- Expiry state is committed **only after** `devicectl` reports a successful
+  installation. A successful signature/export followed by a failed iPhone
+  install does not advance the scheduler state.
+
+The successful-install receipt is stored at:
+
+```text
+.state/install_receipt.json
+```
+
+The effective expiry is the earliest expiry among all validated embedded app
+profiles in that receipt.
+
+Logs:
 
 ```text
 ~/Library/Logs/WeChat2SmartAutoRefresh.log
 ```
 
-The LaunchAgent stores the absolute path to this checkout. Do not move or delete the repository folder while the schedule is installed; uninstall/reinstall the schedule after moving it.
+Uninstalling the smart schedule removes its LaunchAgents and schedule metadata,
+but leaves WeChat 2, the install receipt/history, and provisioning-profile backup
+history untouched.
+
+The LaunchAgent stores the absolute path to this checkout. Do not move or delete
+the repository folder while the schedule is installed; uninstall/reinstall the
+schedule after moving it.
 
 
 ## Refreshing from a different Mac
