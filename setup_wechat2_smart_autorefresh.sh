@@ -152,7 +152,11 @@ activate_retry() {
     return 0
   fi
 
-  launchctl bootstrap "$DOMAIN" "$RETRY_PLIST"
+  if ! launchctl bootstrap "$DOMAIN" "$RETRY_PLIST" >/dev/null 2>&1; then
+    # RunAtLoad wake-up and reconcile can race to activate the same retry
+    # service. Treat "already loaded" as success after re-checking launchd.
+    loaded "$RETRY_LABEL" || return 1
+  fi
   launchctl enable "$DOMAIN/$RETRY_LABEL" >/dev/null 2>&1 || true
   launchctl kickstart "$DOMAIN/$RETRY_LABEL" >/dev/null 2>&1 || true
 }
