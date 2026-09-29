@@ -90,7 +90,7 @@ fi
 
 echo
 note "Installing on iPhone..."
-xcrun devicectl device install app --device "$DEVICE_ID" "$APP"
+install_app_with_retry "$DEVICE_ID" "$APP"
 
 record_profile_expiration_state "$PROFILE_PLIST"
 save_last_device_id "$DEVICE_ID"
