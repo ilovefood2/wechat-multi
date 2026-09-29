@@ -744,3 +744,65 @@ profile_seconds_remaining() {
   now="$(date +%s)"
   echo $((epoch - now))
 }
+
+
+record_embedded_profile_expiration() {
+  local embedded_profile="$1"
+  [ -f "$embedded_profile" ] || return 1
+  ensure_state_dir
+  local decoded="$STATE_DIR/recovered-profile.plist"
+  if security cms -D -i "$embedded_profile" > "$decoded" 2>/dev/null; then
+    record_profile_expiration_state "$decoded"
+    rm -f "$decoded"
+    return 0
+  fi
+  rm -f "$decoded"
+  return 1
+}
+
+recover_profile_expiration_state() {
+  if read_profile_expiration_epoch >/dev/null 2>&1; then
+    return 0
+  fi
+
+  ensure_state_dir
+
+  # 1) A decoded provisioning profile from a previous install/refresh.
+  if [ -f "$WORK_DIR/profile.plist" ]; then
+    if record_profile_expiration_state "$WORK_DIR/profile.plist" >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+
+  # 2) The last extracted/signed app still in .work.
+  local embedded
+  embedded="$(find "$WORK_DIR/sign/Payload" -maxdepth 3 -type f -name embedded.mobileprovision 2>/dev/null | head -1 || true)"
+  if [ -n "$embedded" ] && record_embedded_profile_expiration "$embedded" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  # 3) The last bootstrap app built by Xcode.
+  embedded="$(find "$BUILD_DIR/Build/Products" -maxdepth 5 -type f -name embedded.mobileprovision 2>/dev/null | head -1 || true)"
+  if [ -n "$embedded" ] && record_embedded_profile_expiration "$embedded" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  # 4) A previously exported signed IPA.
+  local signed_ipa="$OUTPUT_DIR/WeChat2-signed.ipa"
+  if [ -f "$signed_ipa" ]; then
+    local member tmp_profile
+    member="$(unzip -Z1 "$signed_ipa" 2>/dev/null | grep -E '^Payload/[^/]+\.app/embedded\.mobileprovision$' | head -1 || true)"
+    if [ -n "$member" ]; then
+      tmp_profile="$STATE_DIR/recovered-embedded.mobileprovision"
+      if unzip -p "$signed_ipa" "$member" > "$tmp_profile" 2>/dev/null; then
+        if record_embedded_profile_expiration "$tmp_profile" >/dev/null 2>&1; then
+          rm -f "$tmp_profile"
+          return 0
+        fi
+      fi
+      rm -f "$tmp_profile"
+    fi
+  fi
+
+  return 1
+}
