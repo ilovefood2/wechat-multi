@@ -12,7 +12,8 @@ echo "  4) Uninstall WeChat 2"
 echo "  5) Install smart auto-refresh schedule"
 echo "  6) Uninstall smart auto-refresh schedule"
 echo "  7) Smart auto-refresh status"
-echo "  8) Open README"\necho "  9) Recover old com.kj.wechat2 clone (preserve data)"
+echo "  8) Open README"
+echo "  9) Recover old com.kj.wechat2 clone (preserve data)"
 echo "  0) Exit"
 echo
 read -r -p "Choose: " c
@@ -25,7 +26,8 @@ case "$c" in
   5) exec /bin/bash "$DIR/setup_wechat2_smart_autorefresh.sh" install ;;
   6) exec /bin/bash "$DIR/setup_wechat2_smart_autorefresh.sh" uninstall ;;
   7) exec /bin/bash "$DIR/setup_wechat2_smart_autorefresh.sh" status ;;
-  8) open "$DIR/README.md" ;;\n  9) exec /bin/bash "$DIR/recover_old_wechat.command" ;;
+  8) open "$DIR/README.md" ;;
+  9) exec /bin/bash "$DIR/recover_old_wechat.command" ;;
   0) exit 0 ;;
   *) echo "Invalid choice."; exit 1 ;;
 esac
