@@ -448,15 +448,22 @@ discover_team_id() {
     [ -n "$DISCOVERED_TEAM" ] && TEAM_SOURCE="matching-profile"
   fi
 
+  # A Team written into this Mac's locally generated project is also valid,
+  # because it reflects an explicit selection made in Xcode on this Mac.
   if [ -z "$DISCOVERED_TEAM" ]; then
     DISCOVERED_TEAM="$(project_team_id)"
     [ -n "$DISCOVERED_TEAM" ] && TEAM_SOURCE="project"
   fi
 
-  # Certificate-only detection is last because Keychain may contain migrated or stale identities.
+  # IMPORTANT: do not auto-select a Team from Keychain certificates alone.
+  # A different/new Mac can contain migrated or stale Apple Development
+  # certificates whose Team is not authenticated in this Mac's Xcode account.
+  # That caused "No Account for Team ..." during refresh on a second Mac.
   if [ -z "$DISCOVERED_TEAM" ]; then
-    DISCOVERED_TEAM="$(certificate_team_id)"
-    [ -n "$DISCOVERED_TEAM" ] && TEAM_SOURCE="certificate"
+    CERT_ONLY_TEAM="$(certificate_team_id 2>/dev/null || true)"
+    if [ -n "$CERT_ONLY_TEAM" ]; then
+      warn "Found certificate-only Team $CERT_ONLY_TEAM, but it is not trusted for automatic selection on this Mac."
+    fi
   fi
 
   if [ -n "$DISCOVERED_TEAM" ]; then
