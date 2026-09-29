@@ -17,6 +17,8 @@ loaded() {
 }
 
 show_status() {
+  recover_profile_expiration_state >/dev/null 2>&1 || true
+
   echo
   echo "===================================================="
   echo "      WeChat 2 — Smart Auto-Refresh Status"
@@ -74,8 +76,25 @@ install_schedule() {
 
   save_autorefresh_device_id "$DEVICE_ID"
 
-  if ! read_profile_expiration_epoch >/dev/null 2>&1 && [ -f "$WORK_DIR/profile.plist" ]; then
-    record_profile_expiration_state "$WORK_DIR/profile.plist" || true
+  recover_profile_expiration_state >/dev/null 2>&1 || true
+
+  if ! read_profile_expiration_epoch >/dev/null 2>&1; then
+    echo
+    echo "No existing profile expiration could be recovered from local install artifacts."
+
+    if list_physical_iphones | grep -Fq "($DEVICE_ID)"; then
+      echo "The target iPhone is online, so one refresh will run now to establish"
+      echo "an accurate provisioning expiration before the hourly schedule starts."
+      echo
+      WECHAT2_DEVICE_ID="$DEVICE_ID" "$ROOT/install_wechat2.command"
+      recover_profile_expiration_state >/dev/null 2>&1 || true
+    else
+      echo "⚠️  The target iPhone is offline. The schedule will still be installed."
+      echo "Until the first successful refresh records the real expiration, the"
+      echo "hourly job will attempt a refresh each hour so an unknown expiry cannot"
+      echo "silently lapse."
+      echo
+    fi
   fi
 
   mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
