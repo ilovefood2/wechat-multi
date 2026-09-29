@@ -697,24 +697,61 @@ build_bootstrap_profile() {
 
 find_signing_identity() {
   IDENTITY_HASH=""
+  IDENTITY_DESC=""
 
-  if [ -n "${DISCOVERED_TEAM:-}" ]; then
-    IDENTITY_HASH="$(
-      security find-identity -v -p codesigning 2>/dev/null \
-        | awk -v team="$DISCOVERED_TEAM" '
-            /"Apple Development:/ && index($0, "(" team ")") {print $2; exit}
-          '
+  # Xcode has just successfully built and signed BOOTSTRAP_APP. Use the exact
+  # signing authority from that app instead of assuming the certificate CN's
+  # parenthesized identifier is the Team ID. On Personal Teams those values can
+  # differ even though TeamIdentifier/application-identifier are correct.
+  if [ -n "${BOOTSTRAP_APP:-}" ] && [ -d "$BOOTSTRAP_APP" ]; then
+    BOOTSTRAP_TEAM="$(
+      /usr/bin/codesign -dv --verbose=4 "$BOOTSTRAP_APP" 2>&1 \
+        | sed -n 's/^TeamIdentifier=//p' \
+        | head -1
     )"
+    BOOTSTRAP_AUTHORITY="$(
+      /usr/bin/codesign -dv --verbose=4 "$BOOTSTRAP_APP" 2>&1 \
+        | sed -n 's/^Authority=//p' \
+        | head -1
+    )"
+
+    if [ -n "${DISCOVERED_TEAM:-}" ] && [ -n "$BOOTSTRAP_TEAM" ] && [ "$BOOTSTRAP_TEAM" != "$DISCOVERED_TEAM" ]; then
+      die "Xcode signed the bootstrap app with Team $BOOTSTRAP_TEAM, but the selected provisioning profile reports Team $DISCOVERED_TEAM. Re-run setup and use one consistent Personal Team."
+    fi
+
+    if [ -n "$BOOTSTRAP_AUTHORITY" ]; then
+      IDENTITY_HASH="$(
+        security find-identity -v -p codesigning 2>/dev/null \
+          | awk -v auth="$BOOTSTRAP_AUTHORITY" 'index($0, "\"" auth "\"") {print $2; exit}'
+      )"
+      if [ -n "$IDENTITY_HASH" ]; then
+        IDENTITY_DESC="$BOOTSTRAP_AUTHORITY"
+      fi
+    fi
   fi
 
-  [ -n "$IDENTITY_HASH" ] || die "No Apple Development certificate matching Team ${DISCOVERED_TEAM:-unknown} was found. Run the bootstrap test app once in Xcode with the intended Personal Team."
+  # Fallback: if the exact Xcode authority could not be mapped, choose an Apple
+  # Development identity and later rely on the embedded profile/codesign checks.
+  # Do not match the certificate CN's parenthesized value to TeamIdentifier.
+  if [ -z "$IDENTITY_HASH" ]; then
+    IDENTITY_HASH="$(
+      security find-identity -v -p codesigning 2>/dev/null \
+        | awk '/"Apple Development:/{print $2; exit}'
+    )"
+    if [ -n "$IDENTITY_HASH" ]; then
+      IDENTITY_DESC="$(
+        security find-identity -v -p codesigning 2>/dev/null \
+          | awk -v h="$IDENTITY_HASH" '$2==h {$1="";$2=""; sub(/^ +/,""); print; exit}'
+      )"
+    fi
+  fi
 
-  IDENTITY_DESC="$(
-    security find-identity -v -p codesigning 2>/dev/null \
-      | awk -v h="$IDENTITY_HASH" '$2==h {$1="";$2=""; sub(/^ +/,""); print; exit}'
-  )"
+  [ -n "$IDENTITY_HASH" ] || die "No usable Apple Development signing identity was found after Xcode successfully provisioned the bootstrap app."
 
   ok "Signing identity: ${IDENTITY_DESC:-$IDENTITY_HASH}"
+  if [ -n "${BOOTSTRAP_TEAM:-}" ]; then
+    ok "Signing TeamIdentifier: $BOOTSTRAP_TEAM"
+  fi
 }
 
 check_ipa_cryptid() {
