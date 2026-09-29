@@ -357,6 +357,75 @@ project_team_id() {
     | head -1 || true
 }
 
+team_id_from_profile() {
+  local profile="$1"
+  [ -f "$profile" ] || return 1
+
+  local decoded app_id team_id expiration now
+  decoded="$(mktemp "${TMPDIR:-/tmp}/wechat2-profile.XXXXXX.plist")"
+  if ! security cms -D -i "$profile" > "$decoded" 2>/dev/null; then
+    rm -f "$decoded"
+    return 1
+  fi
+
+  app_id="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' "$decoded" 2>/dev/null || true)"
+  team_id="$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' "$decoded" 2>/dev/null || true)"
+
+  if [ -z "$team_id" ] || [ -z "$app_id" ]; then
+    rm -f "$decoded"
+    return 1
+  fi
+
+  case "$app_id" in
+    *."$BUNDLE_ID") ;;
+    *)
+      rm -f "$decoded"
+      return 1
+      ;;
+  esac
+
+  expiration="$(python3 - "$decoded" <<'PY'
+import plistlib, sys
+from datetime import timezone
+with open(sys.argv[1], "rb") as f:
+    p = plistlib.load(f)
+dt = p.get("ExpirationDate")
+if dt is None:
+    print(0)
+else:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    print(int(dt.timestamp()))
+PY
+)"
+  now="$(date +%s)"
+  rm -f "$decoded"
+
+  [ "${expiration:-0}" -gt "$now" ] || return 1
+  printf '%s\n' "$team_id"
+}
+
+matching_profile_team_id() {
+  local p team
+
+  # Strongest signal after the user successfully runs the bootstrap app in Xcode.
+  while IFS= read -r p; do
+    team="$(team_id_from_profile "$p" 2>/dev/null || true)"
+    if [ -n "$team" ]; then
+      printf '%s\n' "$team"
+      return 0
+    fi
+  done < <(
+    find "$HOME/Library/Developer/Xcode/DerivedData" \
+         "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles" \
+         "$HOME/Library/MobileDevice/Provisioning Profiles" \
+         -type f \( -name 'embedded.mobileprovision' -o -name '*.mobileprovision' \) \
+         -print 2>/dev/null
+  )
+
+  return 1
+}
+
 certificate_team_id() {
   security find-identity -v -p codesigning 2>/dev/null \
     | grep '"Apple Development:' \
@@ -372,11 +441,19 @@ discover_team_id() {
     TEAM_SOURCE="config"
   fi
 
+  # A live, unexpired provisioning profile for this exact bundle ID is the
+  # strongest automatic signal after the bootstrap test app has run successfully.
+  if [ -z "$DISCOVERED_TEAM" ]; then
+    DISCOVERED_TEAM="$(matching_profile_team_id 2>/dev/null || true)"
+    [ -n "$DISCOVERED_TEAM" ] && TEAM_SOURCE="matching-profile"
+  fi
+
   if [ -z "$DISCOVERED_TEAM" ]; then
     DISCOVERED_TEAM="$(project_team_id)"
     [ -n "$DISCOVERED_TEAM" ] && TEAM_SOURCE="project"
   fi
 
+  # Certificate-only detection is last because Keychain may contain migrated or stale identities.
   if [ -z "$DISCOVERED_TEAM" ]; then
     DISCOVERED_TEAM="$(certificate_team_id)"
     [ -n "$DISCOVERED_TEAM" ] && TEAM_SOURCE="certificate"
@@ -619,12 +696,18 @@ build_bootstrap_profile() {
 }
 
 find_signing_identity() {
-  IDENTITY_HASH="$(
-    security find-identity -v -p codesigning 2>/dev/null \
-      | awk '/"Apple Development:/{print $2; exit}'
-  )"
+  IDENTITY_HASH=""
 
-  [ -n "$IDENTITY_HASH" ] || die "No Apple Development certificate found. Run the bootstrap test app once in Xcode."
+  if [ -n "${DISCOVERED_TEAM:-}" ]; then
+    IDENTITY_HASH="$(
+      security find-identity -v -p codesigning 2>/dev/null \
+        | awk -v team="$DISCOVERED_TEAM" '
+            /"Apple Development:/ && index($0, "(" team ")") {print $2; exit}
+          '
+    )"
+  fi
+
+  [ -n "$IDENTITY_HASH" ] || die "No Apple Development certificate matching Team ${DISCOVERED_TEAM:-unknown} was found. Run the bootstrap test app once in Xcode with the intended Personal Team."
 
   IDENTITY_DESC="$(
     security find-identity -v -p codesigning 2>/dev/null \
