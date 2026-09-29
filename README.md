@@ -77,6 +77,11 @@ The script will:
 
 Run Manager option 3 before development provisioning expires.
 
+Option 3 is treated as a **validated renewal** when a successful-install receipt
+already exists for the selected iPhone: Xcode must provide a profile whose
+`ExpirationDate` genuinely advances beyond the installed receipt. Re-signing
+with the same cached expiry is not reported as a successful refresh.
+
 ## Notes
 
 `REMOVE_EXTENSIONS="1"` is the default. This removes PlugIns, Watch components,
