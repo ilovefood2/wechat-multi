@@ -16,6 +16,19 @@ require_xcode
 ensure_bootstrap_project
 recover_pending_profile_cache_transactions >/dev/null 2>&1 || true
 pick_device
+
+# Manager option 3 is a real renewal request, not just a re-sign with whatever
+# cached profile Xcode happens to return. If we have a successful-install
+# receipt for the selected iPhone, require the new profile expiry to advance.
+if [ "${WECHAT2_MANUAL_REFRESH:-0}" = "1" ] && [ "${WECHAT2_REQUIRE_EXPIRY_ADVANCE:-0}" != "1" ]; then
+  PREV_INSTALLED_EXPIRY="$(read_install_receipt_expiration_epoch "$DEVICE_ID" 2>/dev/null || true)"
+  if [ -n "$PREV_INSTALLED_EXPIRY" ]; then
+    export WECHAT2_REQUIRE_EXPIRY_ADVANCE=1
+    export WECHAT2_PREVIOUS_EXPIRY="$PREV_INSTALLED_EXPIRY"
+    note "Manual refresh requested; new provisioning expiry must advance."
+  fi
+fi
+
 prepare_team_interactively_if_needed
 check_ipa_cryptid
 build_bootstrap_profile
