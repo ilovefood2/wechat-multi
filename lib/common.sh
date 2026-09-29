@@ -366,17 +366,24 @@ certificate_team_id() {
 
 discover_team_id() {
   DISCOVERED_TEAM="${TEAM_ID:-}"
+  TEAM_SOURCE=""
+
+  if [ -n "$DISCOVERED_TEAM" ]; then
+    TEAM_SOURCE="config"
+  fi
 
   if [ -z "$DISCOVERED_TEAM" ]; then
     DISCOVERED_TEAM="$(project_team_id)"
+    [ -n "$DISCOVERED_TEAM" ] && TEAM_SOURCE="project"
   fi
 
   if [ -z "$DISCOVERED_TEAM" ]; then
     DISCOVERED_TEAM="$(certificate_team_id)"
+    [ -n "$DISCOVERED_TEAM" ] && TEAM_SOURCE="certificate"
   fi
 
   if [ -n "$DISCOVERED_TEAM" ]; then
-    ok "Development Team: $DISCOVERED_TEAM"
+    ok "Development Team: $DISCOVERED_TEAM (source: $TEAM_SOURCE)"
     return 0
   fi
 
@@ -542,6 +549,9 @@ build_bootstrap_profile() {
 
   note "Using Xcode to register/provision this iPhone..."
 
+  mkdir -p "$STATE_DIR"
+  XCODE_LOG="$STATE_DIR/last_xcodebuild.log"
+
   set +e
   xcodebuild \
     -project "$PROJECT" \
@@ -552,11 +562,34 @@ build_bootstrap_profile() {
     DEVELOPMENT_TEAM="$DISCOVERED_TEAM" \
     PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
     CODE_SIGN_STYLE=Automatic \
-    build
-  rc=$?
+    build 2>&1 | tee "$XCODE_LOG"
+  rc=${PIPESTATUS[0]}
   set -e
 
-  [ "$rc" -eq 0 ] || {
+  if [ "$rc" -ne 0 ]; then
+    if grep -q 'No Account for Team' "$XCODE_LOG"; then
+      echo
+      warn "Xcode does not have an authenticated account for Team $DISCOVERED_TEAM."
+      if [ "${TEAM_SOURCE:-}" = "certificate" ]; then
+        echo "That Team ID was inferred only from an Apple Development certificate in Keychain."
+        echo "A migrated/stale certificate does not prove the matching Apple Account is signed into Xcode."
+      fi
+      echo
+      echo "One-time fix:"
+      echo "  1) Open Xcode > Settings > Accounts and sign into the Apple Account you want to use."
+      echo "  2) In the generated project:"
+      echo "       TARGETS > WeChatCloneProfile > Signing & Capabilities"
+      echo "  3) Choose the Personal Team shown by that signed-in account."
+      echo "  4) Keep Automatically manage signing enabled."
+      echo "  5) Run the small test app once on the connected iPhone."
+      echo
+      echo "The project will be opened now:"
+      echo "  $PROJECT"
+      echo
+      open "$PROJECT" >/dev/null 2>&1 || open -a Xcode >/dev/null 2>&1 || true
+      exit 3
+    fi
+
     echo
     echo "Xcode provisioning failed."
     echo "Open the generated project:"
@@ -564,8 +597,11 @@ build_bootstrap_profile() {
     echo
     echo "Verify Xcode > Settings > Accounts is signed in and"
     echo "Signing & Capabilities uses your Personal Team."
+    echo
+    echo "Full build log:"
+    echo "  $XCODE_LOG"
     exit "$rc"
-  }
+  fi
 
   BOOTSTRAP_APP="$(find "$BUILD_DIR/Build/Products" -type d -name 'WeChatCloneProfile.app' | head -1)"
   [ -n "$BOOTSTRAP_APP" ] || die "Could not locate the built bootstrap app."
