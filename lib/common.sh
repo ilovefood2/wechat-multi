@@ -448,12 +448,9 @@ discover_team_id() {
     [ -n "$DISCOVERED_TEAM" ] && TEAM_SOURCE="matching-profile"
   fi
 
-  # A Team written into this Mac's locally generated project is also valid,
-  # because it reflects an explicit selection made in Xcode on this Mac.
-  if [ -z "$DISCOVERED_TEAM" ]; then
-    DISCOVERED_TEAM="$(project_team_id)"
-    [ -n "$DISCOVERED_TEAM" ] && TEAM_SOURCE="project"
-  fi
+  # Do not trust the generated project's Team by itself either. The folder can
+  # be copied between Macs. A successful local Xcode run creates a live matching
+  # provisioning profile, which is the proof we want before automatic refresh.
 
   # IMPORTANT: do not auto-select a Team from Keychain certificates alone.
   # A different/new Mac can contain migrated or stale Apple Development
