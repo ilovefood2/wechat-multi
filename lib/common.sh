@@ -41,6 +41,10 @@ load_config() {
   : "${REMOVE_EXTENSIONS:=1}"
   : "${EXPORT_SIGNED_IPA:=1}"
   : "${AUTO_REFRESH_WINDOW_SECONDS:=86400}"
+  case "$AUTO_REFRESH_WINDOW_SECONDS" in
+    ''|*[!0-9]*) die "AUTO_REFRESH_WINDOW_SECONDS must be a positive integer." ;;
+  esac
+  [ "$AUTO_REFRESH_WINDOW_SECONDS" -gt 0 ] || die "AUTO_REFRESH_WINDOW_SECONDS must be greater than zero."
 
   IPA="$ROOT/$IPA_RELATIVE_PATH"
 }
