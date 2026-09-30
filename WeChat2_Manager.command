@@ -13,6 +13,7 @@ echo "  5) Install smart auto-refresh schedule"
 echo "  6) Uninstall smart auto-refresh schedule"
 echo "  7) Smart auto-refresh status"
 echo "  8) Open README"
+echo "  9) Show paired devices / device info"
 echo "  0) Exit"
 echo
 read -r -p "Choose: " c
@@ -26,6 +27,7 @@ case "$c" in
   6) exec /bin/bash "$DIR/setup_wechat2_smart_autorefresh.sh" uninstall ;;
   7) exec /bin/bash "$DIR/setup_wechat2_smart_autorefresh.sh" status ;;
   8) open "$DIR/README.md" ;;
+  9) exec /bin/bash "$DIR/show_paired_devices.command" ;;
   0) exit 0 ;;
   *) echo "Invalid choice."; exit 1 ;;
 esac
