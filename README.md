@@ -191,6 +191,34 @@ the repository folder while the schedule is installed; uninstall/reinstall the
 schedule after moving it.
 
 
+## Paired-device diagnostics
+
+Manager option:
+
+```text
+9) Show paired devices / device info
+```
+
+or run:
+
+```bash
+bash show_paired_devices.command
+```
+
+This is read-only. It shows:
+
+- CoreDevice's paired/known device list;
+- physical iPhones currently visible to Xcode tools;
+- device identifier and selected CoreDevice connection/device details;
+- whether each visible iPhone is currently a usable Xcode run destination;
+- WeChat developer installs returned by CoreDevice, including Bundle ID/version rows;
+- which device is the last successful install target and which is the smart auto-refresh target;
+- the verified provisioning expiry from this checkout's successful-install receipt, when it belongs to that iPhone;
+- Apple Development signing identities available on the current Mac.
+
+A device can remain in the paired/known list while being offline, locked, disconnected,
+or otherwise unavailable as an Xcode run destination.
+
 ## Refreshing from a different Mac
 
 The Apple development signing setup is **per Mac**.
